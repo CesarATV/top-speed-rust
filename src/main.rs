@@ -1,56 +1,101 @@
 #![no_std]
 #![no_main]
 
-use defmt_rtt as _;
-use esp32c3_hal::{
-    clock::ClockControl,
-    gpio::IO,
-    i2c::I2C,
-    interrupt,
-    peripherals::{Interrupt, Peripherals},
-    prelude::*,
-    timer::TimerGroup,
-    Delay, Rtc,
-};
+/// 
+/// This programs transform a hardcoded morse code string into a the blinking of a LED. If a button is pressed, the program restarts the morse code. While the button is pressed, the LED switches rapidly between on and off
+/// 
+
 use esp_backtrace as _;
+use esp_println::println;
+use hal::{clock::ClockControl, peripherals::Peripherals, prelude::*, Delay, IO};
+
+enum MorseCode {
+    DOT,
+    LINE,
+    SPACE
+}
+
+impl Default for MorseCode {
+    fn default() -> Self {
+        MorseCode::SPACE // or any other variant you want as the default
+    }
+}
+
+
+const DOT_DELAY: u32 = 500u32;
+const LINE_DELAY: u32 = DOT_DELAY * 2;
+const SPACE_DELAY: u32 = LINE_DELAY * 2;
+const NOTHING_DELAY: u32 = DOT_DELAY;
+const REPEAT_DELAY: u32 = NOTHING_DELAY * 2;
+const RESTART_DELAY: u32 = 50u32;
+
+const MORSE_CODE_STRING: &str = "..-. .-. . -.. . .-. .. -.-";
+
 
 #[entry]
 fn main() -> ! {
     let peripherals = Peripherals::take();
     let system = peripherals.SYSTEM.split();
+    let clocks = ClockControl::boot_defaults(system.clock_control).freeze();
 
-    let clocks = ClockControl::max(system.clock_control).freeze();
+    println!("Hi!");
+
+    // Set GPIO7 as an output, and set its state high initially.
+    let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
+    let mut led = io.pins.gpio7.into_push_pull_output();
+    let button = io.pins.gpio9.into_pull_up_input();
+
+    led.set_low().unwrap();
+
+    // Initialize the Delay peripheral, and use it to toggle the LED state in a loop.
     let mut delay = Delay::new(&clocks);
 
-    let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
+    let mut code_array: [MorseCode; MORSE_CODE_STRING.len()] = Default::default();
+    for (idx, code_char) in MORSE_CODE_STRING.chars().enumerate() {
+        code_array[idx] = match code_char {
+            '.' => MorseCode::DOT,
+            '-' => MorseCode::LINE,
+            ' ' => MorseCode::SPACE,
+            _ => unreachable!(),
+        }
+    }
 
-    defmt::info!("Hello world!");
-    let i2c = I2C::new(
-        peripherals.I2C0,
-        io.pins.gpio10,
-        io.pins.gpio8,
-        400u32.kHz(),
-        &clocks,
-    );
-
-    interrupt::enable(Interrupt::I2C_EXT0, interrupt::Priority::Priority1).unwrap();
-
-    use icm42670::accelerometer::Accelerometer;
-    let mut imu = icm42670::Icm42670::new(i2c, icm42670::Address::Primary).unwrap();
-
+    let mut idx = 0;
     loop {
-        let gyro_norm = imu.gyro_norm().unwrap();
-        let accelerometer = imu.accel_norm().unwrap();
-        defmt::info!(
-            "ACCEL  =  X: {} Y: {} Z: {}\t\tGYRO  =  X: {} Y: {} Z: {}",
-            accelerometer.x,
-            accelerometer.y,
-            accelerometer.z,
-            gyro_norm.x,
-            gyro_norm.y,
-            gyro_norm.z
-        );
+        if idx >= code_array.len() {
+            idx = 0;
+            delay.delay_ms(REPEAT_DELAY); 
+        }
 
-        delay.delay_ms(500u32);
+        // assumes that the led is always set low (not on) at this point
+        match code_array[idx]
+        { 
+            MorseCode::DOT =>  {
+                led.set_high().unwrap();
+                delay.delay_ms(DOT_DELAY);
+            }
+            MorseCode::LINE =>  {
+                led.set_high().unwrap();
+                delay.delay_ms(LINE_DELAY);
+            }
+            MorseCode::SPACE => {
+                delay.delay_ms(SPACE_DELAY);
+            }            
+        }
+
+        if ! matches!(code_array[idx], MorseCode::SPACE) {
+            led.set_low().unwrap();
+            delay.delay_ms(NOTHING_DELAY);
+        }
+        idx += 1;
+        
+        while button.is_low().unwrap() {
+            led.toggle().unwrap();
+            delay.delay_ms(RESTART_DELAY);
+            led.toggle().unwrap();
+            delay.delay_ms(RESTART_DELAY);
+
+            idx = 0;
+        } 
     }
 }
